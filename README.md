@@ -49,6 +49,7 @@ El DAG `SodaI_Drinks` orquesta el siguiente flujo de trabajo:
 El pipeline monitorea la carpeta dags/new_data/. Si detecta archivos nuevos, los procesa y los mueve a old_data/ para mantener el histórico actualizado.
 
 ### Detección de drift:
+
 Antes de predecir, el pipeline compara el desempeño del modelo actual con el mejor registrado usando la métrica F1. Si la diferencia supera un umbral (por ejemplo, 5%), se considera que hay drift y se activa el reentrenamiento.
 
 ### Reentrenamiento automático:
