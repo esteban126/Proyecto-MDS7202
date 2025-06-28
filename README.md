@@ -52,9 +52,10 @@ El pipeline monitorea la carpeta dags/new_data/. Si detecta archivos nuevos, los
 
 Antes de predecir, el pipeline compara el desempeño del modelo actual con el mejor registrado usando la métrica F1. Si la diferencia supera un umbral (por ejemplo, 5%), se considera que hay drift y se activa el reentrenamiento.
 
+
 ### Reentrenamiento automático:
 
 Si se detecta drift, el pipeline ejecuta la tarea optimize_model, que realiza una búsqueda de hiperparámetros con Optuna y registra los resultados en MLflow. El mejor pipeline se guarda y se utiliza para futuras predicciones.
----
+
 
 
