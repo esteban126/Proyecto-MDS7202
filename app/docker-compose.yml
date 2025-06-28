@@ -1,0 +1,17 @@
+version: "3.9"
+services:
+  backend:
+    build: ./backend
+    container_name: sodai_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../airflow/models:/app/airflow/models
+      - ../airflow/utils:/app/airflow/utils
+  frontend:
+    build: ./frontend
+    container_name: sodai_frontend
+    ports:
+      - "7860:7860"
+    depends_on:
+      - backend

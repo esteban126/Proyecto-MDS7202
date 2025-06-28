@@ -1,0 +1,14 @@
+artifact_uri: file:///content/mlruns/197307434226749748/ce6c205028004760a79f6880df16b14f/artifacts
+end_time: 1750603376708
+entry_point_name: ''
+experiment_id: '197307434226749748'
+lifecycle_stage: active
+run_id: ce6c205028004760a79f6880df16b14f
+run_name: Optuna_Plots
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1750603376692
+status: 3
+tags: []
+user_id: root
