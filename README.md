@@ -37,9 +37,12 @@ El DAG `SodaI_Drinks` orquesta el siguiente flujo de trabajo:
 ---
 ## Diagrama de Flujo del Pipeline
 
+![Captura de pantalla](diagrama_airflow.drawio.png)
+
 ---
 ## Representación Visual del DAG
 
+![Captura de pantalla1](dag_airflow.png)
 
 ---
 ## Lógica para Integrar Nuevos Datos, Detectar Drift y Reentrenar el Modelo
