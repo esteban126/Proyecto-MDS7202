@@ -1,6 +1,0 @@
-artifact_location: file:///content/mlruns/197307434226749748
-creation_time: 1750603303426
-experiment_id: '197307434226749748'
-last_update_time: 1750603303426
-lifecycle_stage: active
-name: XGBoost_Optuna_Optimization

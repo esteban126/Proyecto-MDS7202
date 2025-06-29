@@ -19,100 +19,83 @@ import os
 import pickle
 import matplotlib.pyplot as plt
 import glob
+from xgboost import XGBClassifier
 
+def add_custom_features(df):
+    df = df.sort_values(['customer_id', 'product_id', 'week'])
+    df['total_weekly_purchase'] = df.groupby(['customer_id', 'week'])['items'].transform('sum')
+    df['customer_avg_purchase'] = df.groupby('customer_id')['items'].transform('mean')
+    df['recent_purchase_trend'] = df.groupby('customer_id')['target'].transform(lambda x: x.rolling(window=4, min_periods=1).mean())
+    df['product_avg_purchase'] = df.groupby('product_id')['items'].transform('mean')
+    df['last_purchase_week'] = df.groupby(['customer_id', 'product_id'])['week'].shift(1)
+    df['days_since_last_purchase'] = (pd.to_datetime(df['week']) - pd.to_datetime(df['last_purchase_week'])).dt.days
+    df['days_since_last_purchase'] = df['days_since_last_purchase'].fillna(-1)
+    df['zone_X'] = df['X'].round(1)
+    df['zone_Y'] = df['Y'].round(1)
+
+    # Frecuencia promedio de compra por zona
+    zone_freq = df.groupby(['zone_X', 'zone_Y'])['target'].mean().reset_index()
+    zone_freq = zone_freq.rename(columns={'target': 'zone_avg_purchase_freq'})
+    df = df.merge(zone_freq, on=['zone_X', 'zone_Y'], how='left')
+
+    zone_total = df.groupby(['zone_X', 'zone_Y'])['items'].sum().reset_index()
+    zone_total = zone_total.rename(columns={'items': 'zone_total_purchases'})
+    df = df.merge(zone_total, on=['zone_X', 'zone_Y'], how='left')
+
+    zone_density = df.groupby(['zone_X', 'zone_Y'])['customer_id'].nunique().reset_index()
+    zone_density = zone_density.rename(columns={'customer_id': 'zone_customer_density'})
+    df = df.merge(zone_density, on=['zone_X', 'zone_Y'], how='left')
+
+    return df
 
 def get_monday_of_week(date):
     return date - pd.Timedelta(days=date.weekday())
 
 def preprocessing():
     logging.info("Preprocesamiento Empezó")
-    if detect_new_data() == 'branch_a':
-      old_data_list = []
-      for i in glob.glob('/root/airflow/dags/old_data/*.parquet'):
-        dataframe = pd.read_parquet(i)
-        old_data_list.append(dataframe)
-      df_t = pd.concat(old_data_list)
-      df_t.drop_duplicates(inplace=True)
+    # Detecta si hay datos nuevos
+    if detect_new_data() == 'read_new_data':
+        data_list = []
+        for i in glob.glob('/root/airflow/dags/new_data/*.parquet'):
+            dataframe = pd.read_parquet(i)
+            data_list.append(dataframe)
+        df_t = pd.concat(data_list)
+        df_t.drop_duplicates(inplace=True)
     else:
-      new_data_list = []
-      for i in glob.glob('/root/airflow/dags/new_data/*.parquet'):
-        dataframe = pd.read_parquet(i)
-        new_data_list.append(dataframe)
-      df_t = pd.concat(new_data_list)
-      df_t.drop_duplicates(inplace=True)
+        data_list = []
+        for i in glob.glob('/root/airflow/dags/old_data/*.parquet'):
+            dataframe = pd.read_parquet(i)
+            data_list.append(dataframe)
+        df_t = pd.concat(data_list)
+        df_t.drop_duplicates(inplace=True)
+
     df_c = pd.read_parquet('/root/airflow/dags/other_data/clientes.parquet')
     df_p = pd.read_parquet('/root/airflow/dags/other_data/productos.parquet')
 
-    df = pd.merge(df_t, df_c, on='customer_id', how='left').merge(df_p,on='product_id',how='left')
-    df = df.drop_duplicates()
-
-    df = pd.merge(df_t, df_c, on='customer_id', how='left').merge(df_p,on='product_id',how='left')
+    df = pd.merge(df_t, df_c, on='customer_id', how='left').merge(df_p, on='product_id', how='left')
     df['week'] = pd.to_datetime(df['purchase_date']).apply(get_monday_of_week)
 
+    # Construcción de combinaciones cliente-producto-semana
+    df_t1 = df.copy()[['customer_id','week']].drop_duplicates()
+    df_p1 = df.copy()[['product_id','customer_id']].drop_duplicates()
+    df2 = pd.merge(df_t1, df_p1, on='customer_id').merge(df_c, on='customer_id')
 
-    df_c1 = df.copy()[['customer_id']].value_counts().reset_index()[['customer_id']]
-    df_t1 = df.copy()[['week']].value_counts().reset_index()[['week']]
-    df_p1 = df.copy()[['product_id']].value_counts().reset_index()[['product_id']]
-
-    df_c1['key'] = '1'
-    df_t1['key'] = '1'
-    df_p1['key'] = '1'
-
-    df2 = pd.merge(df_c1, df_t1, on='key').merge(df_p1,on='key')
-    df2 = df2.drop('key', axis=1)
-
-    df1 = df.groupby(['customer_id','product_id','week'],as_index=False,dropna=False)['items'].sum()
-
+    df1 = df.groupby(['customer_id','product_id','week'], as_index=False, dropna=False)['items'].sum()
     df3 = pd.merge(df2, df1, on=['customer_id','product_id','week'], how='left')
     df3.fillna(0, inplace=True)
     df3_1 = df3[df3['items'] > 0]
-    df3_2 = df3[df3['items'] == 0].sample(len(df3_1))
+    df3_2 = df3[df3['items'] == 0].sample(len(df3_1), random_state=42)
     df3 = pd.concat([df3_1, df3_2])
+    df3 = pd.merge(df3, df_p, on='product_id', how='left')
+    df3['target'] = np.where(df3['items'] > 0, 1, 0)
 
-    df_t['purchase_date'] = pd.to_datetime(df_t['purchase_date'])
-    df_t['week'] = df_t['purchase_date'].apply(get_monday_of_week)
+    # Feature engineering avanzado
+    df3 = add_custom_features(df3)
+    df3.fillna(0, inplace=True)
+    if 'items' in df3.columns:
+        df3.drop(columns='items', inplace=True)
 
-    df_ss = df_t.groupby(['customer_id','week'],as_index=False).size()
-    df_ss = df_ss.groupby('customer_id',as_index=False)['size'].mean()
-    df_ss.columns = ['customer_id','avg_items']
-
-    df_tc = df_t.groupby('customer_id',as_index=False)['order_id'].size()
-    df_tc.columns = ['customer_id','num_orders']
-
-    dfp = df_t.sort_values(['product_id', 'purchase_date']) \
-        .groupby(['product_id'])['purchase_date'] \
-        .apply(lambda x: pd.Series(sorted(x)).diff().dropna().dt.days.mean() if len(x) > 1 else 0) \
-        .reset_index(name='Periodicity')
-
-    df3 = df3.merge(dfp,on='product_id',how='left').merge(df_tc,on='customer_id',how='left').merge(df_ss,on='customer_id',how='left')
-    df = pd.merge(df3,df_c,on=['customer_id'],how='left').merge(df_p,on=['product_id'],how='left')
-    df.fillna(0, inplace=True)
-    df['target'] = np.where(df['items'] > 0,1,0)
-    df.drop('items', axis=1, inplace=True)
-
-    df.to_csv('merge_data.csv',index=False)
-
-# def train_model():
-#     logging.info("Starting model training")
-#     preprocessor = joblib.load('preprocessor.joblib')
-#     df = pd.read_csv('merge_data.csv')
-#     X_train, X_test, y_train, y_test = train_test_split(df.drop(columns='target'), df['target'], test_size=0.3, random_state=42)
-#     X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
-
-#     classifier = XGBClassifier(enable_categorical=True)
-
-#     xgb_pipeline = Pipeline(steps=[
-#         ('preprocessor', preprocessor),
-#         ('classifier', classifier)
-#     ])
-
-#     xgb_pipeline.fit(X_train, y_train)
-
-#     y_pred_xgb = xgb_pipeline.predict(X_val)
-
-#     logging.info("Training completed. Classification report:")
-#     logging.info("\n" + classification_report(y_val, y_pred_xgb))
-
+    df3.to_csv('/root/airflow/merge_data.csv', index=False)
 
 
 def get_best_model(experiment_id):
@@ -136,119 +119,160 @@ class DateFeatureExtractor(BaseEstimator, TransformerMixin):
         return X_copy[['month', 'week1']]
 
 def optimize_model():
-    logging.info("Starting model training")
-    df = pd.read_csv('merge_data.csv')
-    df['week'] = pd.to_datetime(df['week']).dt.isocalendar().week.astype('int')
 
-    X = df.drop(columns='target')
-    y = df['target']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-    X_test, X_val, y_test, y_val = train_test_split(X_test, y_test, test_size=0.5, random_state=42)
+    df = pd.read_csv('/root/airflow/merge_data.csv')
 
-    cat_cols = ['region_id','zone_id','num_deliver_per_week',
-                'num_visit_per_week', 'brand', 'category', 'sub_category', 'segment',
-                'package','size','customer_type']
+    # Split temporal
+    df = df.sort_values('week')
+    weeks = df['week'].sort_values().unique()
+    n = len(weeks)
+    train_weeks = weeks[:int(0.7*n)]
+    val_weeks = weeks[int(0.7*n):int(0.85*n)]
+    test_weeks = weeks[int(0.85*n):]
+
+    train = df[df['week'].isin(train_weeks)]
+    val = df[df['week'].isin(val_weeks)]
+    test = df[df['week'].isin(test_weeks)]
+
+    feature_cols = [col for col in df.columns if col not in ['target']]
+    target_col = 'target'
+
+    X_train = train[feature_cols]
+    y_train = train[target_col]
+    X_val = val[feature_cols]
+    y_val = val[target_col]
+    X_test = test[feature_cols]
+    y_test = test[target_col]
+
+    cat_cols = [
+        'brand', 'category', 'sub_category', 'segment', 'package', 'customer_type',
+        'zone_X', 'zone_Y'
+    ]
+    num_cols = [
+        'size', 'num_deliver_per_week',
+        'total_weekly_purchase', 'customer_avg_purchase', 'recent_purchase_trend',
+        'product_avg_purchase', 'days_since_last_purchase',
+        'zone_avg_purchase_freq', 'zone_total_purchases', 'zone_customer_density'
+    ]
     date_features = ['week']
 
-    for col in cat_cols:
-        X_train[col] = X_train[col].astype('category')
-        X_val[col] = X_val[col].astype('category')
-
-    best_f1 = -np.inf
-    best_pipeline = None
-    best_params = None
-
     def objective(trial):
-        nonlocal best_f1, best_pipeline, best_params
+        imputer_strategy = trial.suggest_categorical("imputer_strategy", ["mean", "median"])
+        scaler_type = trial.suggest_categorical("scaler", ["standard", "minmax"])
+        encoder_type = trial.suggest_categorical("encoder", ["onehot", "ordinal"])
 
-        params = {
-            "objective": "binary:logistic",
-            "eval_metric": "logloss",
-            "booster": "gbtree",
-            "lambda": trial.suggest_float("lambda", 1e-3, 10.0),
-            "alpha": trial.suggest_float("alpha", 1e-3, 10.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 1.0),
-            "subsample": trial.suggest_float("subsample", 0.3, 1.0),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3),
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-            "n_estimators": 100,
-            "use_label_encoder": False,
-            "random_state": 42,
-            "enable_categorical": True
-        }
-
-        categorical_pipeline = Pipeline([
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+        scaler = StandardScaler() if scaler_type == "standard" else MinMaxScaler()
+        num_pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy=imputer_strategy)),
+            ("scaler", scaler)
         ])
+
+        if encoder_type == "onehot":
+            encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        else:
+            encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+        cat_pipeline = Pipeline([
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("encoder", encoder)
+        ])
+
         date_pipeline = Pipeline([
             ('date_features', DateFeatureExtractor(date_column='week'))
         ])
+
         preprocessor = ColumnTransformer([
-            ("cat", categorical_pipeline, cat_cols),
-            ('date', date_pipeline, date_features)
+            ("num", num_pipeline, num_cols),
+            ("cat", cat_pipeline, cat_cols),
+            ("date", date_pipeline, date_features)
         ])
 
-        model = xgb.XGBClassifier(**params)
-        full_pipeline = Pipeline([
-            ('preprocessor', preprocessor),
-            ('model', model)
+        clf = XGBClassifier(
+            n_estimators=trial.suggest_int("n_estimators", 50, 300),
+            max_depth=trial.suggest_int("max_depth", 3, 10),
+            learning_rate=trial.suggest_float("learning_rate", 0.01, 0.3),
+            subsample=trial.suggest_float("subsample", 0.5, 1.0),
+            colsample_bytree=trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            gamma=trial.suggest_float("gamma", 0, 5),
+            reg_alpha=trial.suggest_float("reg_alpha", 0.0, 1.0),
+            reg_lambda=trial.suggest_float("reg_lambda", 0.0, 1.0),
+            use_label_encoder=False,
+            eval_metric="aucpr",
+            scale_pos_weight=(len(y_train) / y_train.sum()),
+            random_state=42,
+            n_jobs=-1
+        )
+
+        pipe = Pipeline([
+            ("preprocessor", preprocessor),
+            ("classifier", clf)
         ])
 
-        full_pipeline.fit(X_train, y_train)
-        preds = full_pipeline.predict(X_val)
+        pipe.fit(X_train, y_train)
+        preds = pipe.predict(X_val)
         f1 = f1_score(y_val, preds)
-
-        # Guardar el mejor pipeline y sus params
-        if f1 > best_f1:
-            best_f1 = f1
-            best_pipeline = pickle.loads(pickle.dumps(full_pipeline))  # Deep copy
-            best_params = params.copy()
-
-        # MLflow: solo métricas, params y plot
-        with mlflow.start_run(run_name=f"trial_f1_{f1:.4f}"):
-            mlflow.log_metric("valid_f1", f1)
-            mlflow.log_params(params)
-            # Interpretabilidad
-            plt.figure(figsize=(8,6))
-            xgb.plot_importance(model)
-            plt.title("Feature Importance")
-            plt.tight_layout()
-            plot_path = "feature_importance.png"
-            plt.savefig(plot_path)
-            plt.close()
-            mlflow.log_artifact(plot_path, artifact_path="plots")
-            os.remove(plot_path)
-
         return f1
 
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=5)
 
-    # Optuna plots
-    os.makedirs("plots", exist_ok=True)
-    fig1 = optuna.visualization.matplotlib.plot_optimization_history(study)
-    fig1_path = "plots/optimization_history.png"
-    fig1.figure.savefig(fig1_path)
-    plt.close(fig1.figure)
+    # Entrenamiento final con mejores hiperparámetros
+    best_params = study.best_params
+    scaler = StandardScaler() if best_params["scaler"] == "standard" else MinMaxScaler()
+    if best_params["encoder"] == "onehot":
+        encoder = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+    else:
+        encoder = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
 
-    fig2 = optuna.visualization.matplotlib.plot_param_importances(study)
-    fig2_path = "plots/param_importances.png"
-    fig2.figure.savefig(fig2_path)
-    plt.close(fig2.figure)
+    num_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy=best_params["imputer_strategy"])),
+        ("scaler", scaler)
+    ])
+    cat_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("encoder", encoder)
+    ])
+    date_pipeline = Pipeline([
+        ('date_features', DateFeatureExtractor(date_column='week'))
+    ])
 
-    with mlflow.start_run(run_name="Optuna_Plots"):
-        mlflow.log_artifact(fig1_path, artifact_path="plots")
-        mlflow.log_artifact(fig2_path, artifact_path="plots")
+    preprocessor = ColumnTransformer([
+        ("num", num_pipeline, num_cols),
+        ("cat", cat_pipeline, cat_cols),
+        ("date", date_pipeline, date_features)
+    ])
 
-    # Guarda el mejor pipeline con pickle
-    os.makedirs("models", exist_ok=True)
-    with open("models/full_pipeline.pkl", "wb") as f:
-        pickle.dump(best_pipeline, f)
-    print(f"Mejor F1: {best_f1:.4f} - Pipeline guardado en models/full_pipeline.pkl")
-    print("Hiperparámetros del mejor modelo:", best_params)
+    clf = XGBClassifier(
+        n_estimators=best_params["n_estimators"],
+        max_depth=best_params["max_depth"],
+        learning_rate=best_params["learning_rate"],
+        subsample=best_params["subsample"],
+        colsample_bytree=best_params["colsample_bytree"],
+        gamma=best_params["gamma"],
+        reg_alpha=best_params["reg_alpha"],
+        reg_lambda=best_params["reg_lambda"],
+        use_label_encoder=False,
+        eval_metric="aucpr",
+        scale_pos_weight=(len(y_train) / y_train.sum()),
+        random_state=42,
+        n_jobs=-1
+    )
 
+    pipe = Pipeline([
+        ("preprocessor", preprocessor),
+        ("classifier", clf)
+    ])
+
+    pipe.fit(X_train, y_train)
+    y_pred = pipe.predict(X_test)
+
+    print("Reporte de Clasificación del Modelo Optimizado:")
+    print(classification_report(y_test, y_pred))
+
+    # Guarda el pipeline
+    import os
+    os.makedirs("/root/airflow/models", exist_ok=True)
+    with open("/root/airflow/models/full_pipeline.pkl", "wb") as f:
+        pickle.dump(pipe, f)
 
 def detect_new_data():
     old_data_dir = '/root/airflow/dags/old_data/'
@@ -287,87 +311,81 @@ def branch_use_current_params():
         best_f1 = runs['metrics.valid_f1'].max()
         best_run_id = runs[runs['metrics.valid_f1'] == best_f1].run_id.iloc[0]
 
-        df = pd.read_csv('/merge_data.csv')
+        # Carga datos completos
+        df = pd.read_csv('/root/airflow/merge_data.csv')
         preprocessor = mlflow.sklearn.load_model(f"runs:/{best_run_id}/preprocessor")
-        X_test = df.drop(columns='target')
-        y_test = df['target']
-        X_test = preprocessor.transform(X_test)
 
-        model_path = '/root/airflow/dags/models/new_best_xgb_model.pkl'
-        with open(model_path, 'rb') as f:
-            model = pickle.load(f)
+        # Identifica la última semana
+        last_week = df['week'].max()
+        mask_new = df['week'] == last_week
+        mask_ref = df['week'] != last_week
 
-        # Use the model for prediction
-        predictions = model.predict(X_test)
-        current_f1 = f1_score(y_test, predictions)
-        if 100 * (best_f1 - current_f1)/current_f1 < 5:
-          return 'optimize_model'
+        # Separa referencia y nueva data
+        X_ref = df[mask_ref].drop(columns='target')
+        X_test_new = df[mask_new].drop(columns='target')
+
+        # Si no hay suficiente data de referencia o nueva, no hacer drift
+        if X_ref.shape[0] < 10 or X_test_new.shape[0] < 10:
+            print("No hay suficiente data para comparar drift.")
+            return 'predictions'
+
+        # Preprocesa ambas
+        X_ref_proc = preprocessor.transform(X_ref)
+        X_test_proc = preprocessor.transform(X_test_new)
+
+        # Drift detection
+        cd = MMDDrift(X_ref_proc, p_val=0.05)
+        preds = cd.predict(X_test_proc)
+        is_drift = preds['data']['is_drift']
+        p_value = preds['data']['p_val']
+        print(f"Drift detected: {is_drift}, p-value: {p_value}")
+
+        if is_drift:
+            return 'optimize_model'
         else:
-          return 'predictions'
-    except:
+            return 'predictions'
+    except Exception as e:
+        print("Error:", e)
         return 'optimize_model'
 
-
 def predictions():
+
     df_c = pd.read_parquet('/root/airflow/dags/other_data/clientes.parquet')
     df_p = pd.read_parquet('/root/airflow/dags/other_data/productos.parquet')
     df_t = pd.read_parquet('/root/airflow/dags/old_data/transacciones.parquet')
 
-    with open('models/full_pipeline.pkl', 'rb') as f:
+    with open('/root/airflow/models/full_pipeline.pkl', 'rb') as f:
         full_pipeline = pickle.load(f)
 
     df_t['week'] = pd.to_datetime(df_t['purchase_date']).apply(get_monday_of_week)
-
     df = pd.merge(df_t, df_c, on='customer_id', how='left').merge(df_p, on='product_id', how='left')
 
-    df_c['key'] = '1'
-    df_p['key'] = '1'
-    df2 = pd.merge(df_p, df_c, on='key').drop('key', axis=1)
-    df2['week'] = df['week'].max() + timedelta(days=7)
-    df2['week'] = df2['week'].astype(str)
-    df['week'] = df['week'].astype(str)
+    # Construcción de combinaciones cliente-producto-semana
+    df_t1 = df.copy()[['customer_id','week']].drop_duplicates()
+    df_p1 = df.copy()[['product_id','customer_id']].drop_duplicates()
+    df2 = pd.merge(df_t1, df_p1, on='customer_id').merge(df_c, on='customer_id')
 
-    df1 = df.groupby(['customer_id', 'product_id', 'week'], as_index=False, dropna=False)['items'].sum()
-    df3 = pd.merge(df2, df1, on=['customer_id', 'product_id', 'week'], how='left')
+    df1 = df.groupby(['customer_id','product_id','week'], as_index=False, dropna=False)['items'].sum()
+    df3 = pd.merge(df2, df1, on=['customer_id','product_id','week'], how='left')
+    df3.fillna(0, inplace=True)
+    df3_1 = df3[df3['items'] > 0]
+    df3_2 = df3[df3['items'] == 0]
+    df3 = pd.concat([df3_1, df3_2])
+    df3 = pd.merge(df3, df_p, on='product_id', how='left')
+    df3['target'] = np.where(df3['items'] > 0, 1, 0)
 
-    df_ss = df_t.groupby(['customer_id', 'week'], as_index=False).size()
-    df_ss = df_ss.groupby('customer_id', as_index=False)['size'].mean()
-    df_ss.columns = ['customer_id', 'avg_items']
-
-    df_tc = df_t.groupby('customer_id', as_index=False)['order_id'].size()
-    df_tc.columns = ['customer_id', 'num_orders']
-
-    dfp = df_t.sort_values(['product_id', 'purchase_date']) \
-        .groupby(['product_id'])['purchase_date'] \
-        .apply(lambda x: pd.Series(sorted(x)).diff().dropna().dt.days.mean() if len(x) > 1 else 0) \
-        .reset_index(name='Periodicity')
-
-    df3 = df3.merge(dfp, on='product_id', how='left') \
-              .merge(df_tc, on='customer_id', how='left') \
-              .merge(df_ss, on='customer_id', how='left')
-
+    # Feature engineering avanzado
+    df3 = add_custom_features(df3)
     df3.fillna(0, inplace=True)
     if 'items' in df3.columns:
         df3.drop(columns='items', inplace=True)
 
-    # --- Asegúrate de que las columnas categóricas tengan el tipo correcto ---
-    categorical_cols = ['region_id','zone_id','num_deliver_per_week',
-                        'num_visit_per_week', 'brand', 'category', 'sub_category', 'segment',
-                        'package','size','customer_type']
+    # Predicción
+    X_pred = df3.copy()
+    predictions = full_pipeline.predict(X_pred)
 
-    for col in categorical_cols:
-        df3[col] = df3[col].astype('category')
-
-    # --- Selecciona solo las columnas usadas en entrenamiento ---
-    # (Asegúrate de que estas columnas coincidan con las usadas en el pipeline)
-    X_test = df3.copy()
-    #X_test.to_csv('data_testing.csv', index=False)
-    # --- Predice directamente con el pipeline ---
-    predictions = full_pipeline.predict(X_test)
-
-    # --- Guarda resultados ---
     output_df = df3.copy()
     output_df['predictions'] = predictions
-    output_df = output_df[output_df.predictions==1].drop(columns='predictions')
-    output_df.to_csv('models/data_testing.csv', index=False)
-    #logging.info("Predictions saved successfully.")
+    output_df = output_df[output_df.predictions == 1].drop(columns='predictions')
+    output_df.to_csv('/root/airflow/models/data_testing.csv', index=False)
+
