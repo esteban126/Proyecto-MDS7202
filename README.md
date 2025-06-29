@@ -50,7 +50,7 @@ El pipeline monitorea la carpeta dags/new_data/. Si detecta archivos nuevos, los
 
 ### Detección de drift:
 
-Antes de predecir, el pipeline compara el desempeño del modelo actual con el mejor registrado usando la métrica F1. Si la diferencia supera un umbral (por ejemplo, 5%), se considera que hay drift y se activa el reentrenamiento.
+Antes de predecir, el pipeline compara la distribución de las características de la última semana con la de las semanas anteriores utilizando el método MMDDrift de alibi-detect. Si se detecta drift estadístico (es decir, el test indica que la nueva semana es significativamente diferente a las anteriores según el p-value), se activa el reentrenamiento automático del modelo.
 
 
 ### Reentrenamiento automático:
