@@ -54,18 +54,18 @@ with DAG(
     dag=dag
     )
 
-    # Task 7
+    # Task 5
     task_optimize_model = PythonOperator(
     task_id='optimize_model',
     python_callable=optimize_model
     )    
-    # Task 8
+    # Task 6
     task_predictions = PythonOperator(
     task_id='predictions',
     python_callable=predictions
     )    
     
-    # Task 8
+    # Task 7
     final_dummy_task = EmptyOperator(task_id='End', retries=1)  
     # Define the workflow process
     

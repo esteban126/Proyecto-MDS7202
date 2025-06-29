@@ -1,27 +1,45 @@
+# -*- coding: utf-8 -*-
+"""
+Módulo principal de procesamiento, entrenamiento y predicción para el pipeline MLOps.
+Incluye funciones para ingeniería de características, preprocesamiento, entrenamiento con Optuna,
+detección de drift y generación de predicciones.
+
+Estructura:
+- add_custom_features: Ingeniería de variables adicionales.
+- preprocessing: Limpieza, combinación y balanceo de datos.
+- optimize_model: Optimización de hiperparámetros y entrenamiento final.
+- branch_use_current_params: Detección de drift entre la última semana y el histórico.
+- predictions: Generación de predicciones para nuevos datos.
+"""
+
 from datetime import timedelta
 import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler,MinMaxScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.preprocessing import StandardScaler, MinMaxScaler, OneHotEncoder, OrdinalEncoder
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, log_loss,classification_report,f1_score
-from sklearn import set_config
+from sklearn.metrics import classification_report, f1_score
 import xgboost as xgb
 import numpy as np
 import joblib
 import logging
 import optuna
-from optuna.importance import get_param_importances
 import mlflow
 import os
 import pickle
 import matplotlib.pyplot as plt
 import glob
 from xgboost import XGBClassifier
+from alibi_detect.cd import MMDDrift
 
 def add_custom_features(df):
+    """
+    Agrega variables de ingeniería de características al DataFrame:
+    - Promedios y tendencias de compra por cliente y producto.
+    - Días desde la última compra.
+    - Variables agregadas por zona geográfica.
+    """
     df = df.sort_values(['customer_id', 'product_id', 'week'])
     df['total_weekly_purchase'] = df.groupby(['customer_id', 'week'])['items'].transform('sum')
     df['customer_avg_purchase'] = df.groupby('customer_id')['items'].transform('mean')
@@ -49,9 +67,20 @@ def add_custom_features(df):
     return df
 
 def get_monday_of_week(date):
+    """
+    Dada una fecha, retorna el lunes de esa semana.
+    """
     return date - pd.Timedelta(days=date.weekday())
 
 def preprocessing():
+    """
+    Realiza la limpieza, combinación y balanceo de los datos.
+    - Lee datos nuevos o históricos según detect_new_data().
+    - Une información de clientes y productos.
+    - Genera combinaciones cliente-producto-semana.
+    - Balancea clases y aplica ingeniería de características.
+    - Guarda el dataset final para entrenamiento.
+    """
     logging.info("Preprocesamiento Empezó")
     # Detecta si hay datos nuevos
     if detect_new_data() == 'read_new_data':
@@ -97,15 +126,19 @@ def preprocessing():
 
     df3.to_csv('/root/airflow/merge_data.csv', index=False)
 
-
 def get_best_model(experiment_id):
+    """
+    Recupera el mejor modelo registrado en MLflow para un experimento dado.
+    """
     runs = mlflow.search_runs(experiment_id)
     best_model_id = runs.sort_values("metrics.valid_f1", ascending=False)["run_id"].iloc[0]
     best_model = mlflow.sklearn.load_model(f"runs:/{best_model_id}/model")
     return best_model
 
-# ---------- Clase para transformar fechas ----------
 class DateFeatureExtractor(BaseEstimator, TransformerMixin):
+    """
+    Transformer personalizado para extraer características temporales a partir de una columna de fecha.
+    """
     def __init__(self, date_column='week'):
         self.date_column = date_column
 
@@ -119,9 +152,14 @@ class DateFeatureExtractor(BaseEstimator, TransformerMixin):
         return X_copy[['month', 'week1']]
 
 def optimize_model():
-
+    """
+    Realiza la optimización de hiperparámetros usando Optuna y entrena el modelo final.
+    - Divide los datos temporalmente en train/val/test.
+    - Define pipelines de preprocesamiento para variables numéricas, categóricas y de fecha.
+    - Busca los mejores hiperparámetros con Optuna.
+    - Entrena el pipeline final y guarda el modelo entrenado.
+    """
     df = pd.read_csv('/root/airflow/merge_data.csv')
-
     # Split temporal
     df = df.sort_values('week')
     weeks = df['week'].sort_values().unique()
@@ -157,6 +195,9 @@ def optimize_model():
     date_features = ['week']
 
     def objective(trial):
+        """
+        Función objetivo para Optuna: define y entrena el pipeline con hiperparámetros sugeridos.
+        """
         imputer_strategy = trial.suggest_categorical("imputer_strategy", ["mean", "median"])
         scaler_type = trial.suggest_categorical("scaler", ["standard", "minmax"])
         encoder_type = trial.suggest_categorical("encoder", ["onehot", "ordinal"])
@@ -268,13 +309,16 @@ def optimize_model():
     print("Reporte de Clasificación del Modelo Optimizado:")
     print(classification_report(y_test, y_pred))
 
-    # Guarda el pipeline
-    import os
+    # Guarda el pipeline completo para predicción futura
     os.makedirs("/root/airflow/models", exist_ok=True)
     with open("/root/airflow/models/full_pipeline.pkl", "wb") as f:
         pickle.dump(pipe, f)
 
 def detect_new_data():
+    """
+    Detecta si hay nuevos archivos de datos en la carpeta correspondiente.
+    Retorna 'read_new_data' si hay nuevos archivos, 'dont_predict' en caso contrario.
+    """
     old_data_dir = '/root/airflow/dags/old_data/'
     new_data_dir = '/root/airflow/dags/new_data/'
     current_files = len(set(os.listdir(old_data_dir)))
@@ -287,6 +331,10 @@ def detect_new_data():
       return "dont_predict"
 
 def read_new_data():
+    """
+    Lee y concatena los datos nuevos y antiguos, eliminando duplicados.
+    Actualiza los archivos de transacciones históricos.
+    """
     old_data_list = []
     new_data_list = []
     for i in glob.glob('/root/airflow/dags/new_data/*.parquet'):
@@ -304,6 +352,10 @@ def read_new_data():
     df_nt.to_parquet(f'/root/airflow/dags/old_data/transacciones_{start_date}_{end_date}.parquet')
 
 def branch_use_current_params():
+    """
+    Detección de drift entre la última semana y el histórico usando MMDDrift.
+    Si se detecta drift, retorna 'optimize_model' para reentrenar; si no, retorna 'predictions'.
+    """
     try:
         experiment_name = "XGBoost_Optuna_Optimization"
         experiment = mlflow.get_experiment_by_name(experiment_name)
@@ -349,7 +401,12 @@ def branch_use_current_params():
         return 'optimize_model'
 
 def predictions():
-
+    """
+    Genera predicciones para los datos más recientes usando el pipeline entrenado.
+    - Lee y combina datos de clientes, productos y transacciones.
+    - Aplica ingeniería de características.
+    - Predice y guarda solo las combinaciones cliente-producto con predicción positiva.
+    """
     df_c = pd.read_parquet('/root/airflow/dags/other_data/clientes.parquet')
     df_p = pd.read_parquet('/root/airflow/dags/other_data/productos.parquet')
     df_t = pd.read_parquet('/root/airflow/dags/old_data/transacciones.parquet')
@@ -388,4 +445,3 @@ def predictions():
     output_df['predictions'] = predictions
     output_df = output_df[output_df.predictions == 1].drop(columns='predictions')
     output_df.to_csv('/root/airflow/models/data_testing.csv', index=False)
-
